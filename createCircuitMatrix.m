@@ -16,7 +16,7 @@ function diagMat = createCircuitMatrixWithConnections()
 %   disp(M);
 
 % 1. Găsește blocurile R, L și C
-modelName=bdroot;
+modelName='CalCulator_ModelMatematic_Test';
 rBlocks = find_system(modelName, 'Regexp', 'on', 'Name', '^R');
 lBlocks = find_system(modelName, 'Regexp', 'on', 'Name', '^I');
 cBlocks = find_system(modelName, 'Regexp', 'on', 'Name', '^C');
@@ -49,9 +49,9 @@ for i = 1:length(allBlocks)
     % Presupunem că primul caracter din nume definește tipul
     blkName = get_param(allBlocks{i}, 'Name');
     if ~isempty(blkName)
-        types{end+1} = blkName(1);  % ex.: 'R', 'L', 'C'
+        types{end+1} = [blkName(1) blkName(end)];  % ex.: 'R', 'L', 'C'
     else
-        types{end+1} = '0';
+        types{end+1} = "0";
     end
 end
 
@@ -70,7 +70,7 @@ numCols = maxX - minX + 1;
 numRows = maxY - minY + 1;
 
 % Inițial, matricea este completată cu '0' (celule libere)
-diagMat = repmat('0', numRows, numCols);
+diagMat = repmat("0", numRows, numCols);
 
 % 4. Plasează blocurile în matrice
 % Inițial, creează un cell array completat cu stringuri goale
@@ -114,7 +114,7 @@ for i = 1:length(lineHandles)
         col2 = floor(p2(1) / gridSize) - minX + 1;
         row2 = floor(p2(2) / gridSize) - minY + 1;
         row2 = numRows - row2 + 1;
-        
+
         % Obține toate celulele de pe segmentul dintre (col1, row1) și (col2, row2)
         coords = bresenham(col1, row1, col2, row2);
         
@@ -129,8 +129,8 @@ for i = 1:length(lineHandles)
             % Verifică dacă coordonata este validă în matrice
             if rIdx >= 1 && rIdx <= numRows && cIdx >= 1 && cIdx <= numCols
                 % Dacă celula este liberă ('0'), o marchez cu '1'
-                if diagMat(rIdx, cIdx) == '0'
-                    diagMat(rIdx, cIdx) = '1';
+                if diagMat(rIdx, cIdx) == "0"
+                    diagMat(rIdx, cIdx) = "1";
                 end
             end
         end
