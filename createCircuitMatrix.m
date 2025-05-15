@@ -24,7 +24,6 @@ uBlocks = find_system(modelName, 'Regexp', 'on', 'Name', '^V');
 yBlocks = find_system(modelName, 'Regexp', 'on', 'Name', '^E');
 
 
-
 allBlocks = [rBlocks; lBlocks; cBlocks; uBlocks;yBlocks];
 
 if isempty(allBlocks)
