@@ -1,3 +1,4 @@
+
 function diagMat = createCircuitMatrixWithConnections()
 % createCircuitMatrixWithConnections - Creează o reprezentare matricială
 % simplificată a diagramei din modelul Simulink specificat, incluzând
@@ -69,7 +70,7 @@ numCols = maxX - minX + 1;
 numRows = maxY - minY + 1;
 
 % Inițial, matricea este completată cu '0' (celule libere)
-diagMat = repmat("0", numRows, numCols);
+diagMat = repmat("0", numRows+1, numCols+1);
 
 % 4. Plasează blocurile în matrice
 % Inițial, creează un cell array completat cu stringuri goale
@@ -79,8 +80,8 @@ for i = 1:size(centers,1)
     % Mapare din coordonate în pixeli la indici de grilă:
     colIdx = floor(centers(i,1) / gridSize) - minX + 1;
     rowIdx = floor(centers(i,2) / gridSize) - minY + 1;
-    % Inversăm rândurile pentru a avea 0 sus (coincide cu coordonatele vizuale)
-    rowIdx = numRows - rowIdx + 1;
+    % Inversăm rândurile pentru a avea 0 sus (coincide cu coordonatele vizuale)%
+    %rowIdx = numRows - rowIdx + 1;
     
     diagMat(rowIdx, colIdx) = types{i};
 end
@@ -107,12 +108,12 @@ for i = 1:length(lineHandles)
         % Mapare la indici de grilă pentru p1
         col1 = floor(p1(1) / gridSize) - minX + 1;
         row1 = floor(p1(2) / gridSize) - minY + 1;
-        row1 = numRows - row1 + 1;
+       % row1 = numRows - row1 + 1;
         
         % Mapare la indici de grilă pentru p2
         col2 = floor(p2(1) / gridSize) - minX + 1;
         row2 = floor(p2(2) / gridSize) - minY + 1;
-        row2 = numRows - row2 + 1;
+       % row2 = numRows - row2 + 1;
 
         % Obține toate celulele de pe segmentul dintre (col1, row1) și (col2, row2)
         coords = bresenham(col1, row1, col2, row2);
@@ -133,6 +134,7 @@ for i = 1:length(lineHandles)
                 end
             end
         end
+    
     end
 end
 

@@ -34,7 +34,7 @@ for i=1:rows
         end
     end
 end
-
+ visualiseGraph(branches)
 %% 3. KCL: legea curentului pentru fiecare nod cu >=2 ramuri
 KCL = {};
 for n=1:nodeCount
