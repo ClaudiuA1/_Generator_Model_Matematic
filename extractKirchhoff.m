@@ -11,13 +11,14 @@ nodeCount = 0;
 %% 1. Flood-fill pentru identificarea nodurilor (doar fire '1')
 for i=1:rows
     for j=1:cols
-        if strcmp(mat{i,j}, '1') && nodeMap(i,j)==0
+        if strcmp(mat{i,j}, '1') && nodeMap(i,j)==0 
             nodeCount = nodeCount + 1;
             cells = floodFill(mat, i, j, rows, cols);
             for k=1:size(cells,1)
                 nodeMap(cells(k,1), cells(k,2)) = nodeCount;
             end
         end
+        
     end
 end
 
@@ -35,20 +36,84 @@ for i=1:rows
     end
 end
  visualiseGraph(branches)
-%% 3. KCL: legea curentului pentru fiecare nod cu >=2 ramuri
+%% 3. KCL: legea curentului pentru fiecare nod
 KCL = {};
-for n=1:nodeCount
-    inc = cellfun(@(b) b{2}==n || b{3}==n, branches);
-    if sum(inc)>1
-    % Excludem sursele de tensiune (Ve, E1, etc.) din legea curentului
-    valid = branches(inc);
-    valid = valid(~cellfun(@(b) startsWith(b{1}, 'Ve') || startsWith(b{1}, 'E'), valid));
-    if numel(valid)>1
-        terms = cellfun(@(b)['i' b{1}], valid, 'UniformOutput',false);
-        KCL{end+1} = strjoin(terms, ' = ');
+for n = 1:nodeCount
+    % 3.a) Găsim toate ramurile care ating nodul n (inclusiv surse)
+    ramIndices = find(cellfun(@(b) (b{2} == n) || (b{3} == n), branches));
+    if isempty(ramIndices)
+        continue;  % nod fără ramuri
+    end
+    
+    % 3.b) Excludem complet sursele de tensiune (prefix V sau E)
+    isPassive = ~cellfun(@(b) startsWith(b{1}, 'V') || startsWith(b{1}, 'E'), branches(ramIndices));
+    nonSrcIdx = ramIndices(isPassive);
+    if isempty(nonSrcIdx)
+        continue;  % după excluderea surselor nu mai rămâne nicio ramură pasivă
+    end
+    
+    % 3.c) Împărțim ramurile pasive în două categorii:
+    %      incomingIdx = acele ramuri care ajung în nod (b{3} == n)
+    %      outgoingIdx = acele ramuri care pleacă din nod (b{2} == n)
+    incomingMask = cellfun(@(b) (b{3} == n), branches(nonSrcIdx));
+    incomingIdx = nonSrcIdx(incomingMask);
+    outgoingIdx = nonSrcIdx(~incomingMask);
+    
+    % 3.d) Scriem ecuația în funcție de numărul de ramuri pasive
+    switch numel(nonSrcIdx)
+        case 1
+            % --- EXACT O SINGURĂ ramură pasivă la acest nod ---
+            k = nonSrcIdx;       % indexul acelei singure ramuri
+            lbl = branches{k}{1};% eticheta, ex. 'R1'
+            
+            if ~isempty(incomingIdx) && isempty(outgoingIdx)
+                % Situație: exact o singură ramură și ea e incoming
+                % Ilbl = suma tuturor curenților outgoing (dar nu există outgoing)
+                % => pur și simplu Ilbl = 0 nu are sens fizic în KCL
+                % scriem: Ilbl = (nimic)  → implicit Ilbl = 0, dar mai bine ignorăm
+                % DECIDEM: nu generăm ecuație în acest caz (de obicei nu apare
+                % “doar o singură ramură pasivă” într-un circuit normal).
+                continue;
+                
+            elseif isempty(incomingIdx) && ~isempty(outgoingIdx)
+                % Situație: exact o singură ramură și ea e outgoing
+                % => (suma incoming) = Ilbl, dar incoming e vidă
+                % => 0 = Ilbl, iar Ilbl nu poate fi 0 fizic
+                % DECIDEM: nu generăm ecuație
+                continue;
+                
+            elseif ~isempty(incomingIdx) && ~isempty(outgoingIdx)
+                % Practic cam imposibil: dacă există o singură ramură pasivă,
+                % nu poate fi în același timp și incoming, și outgoing.
+                continue;
+            end
+            
+        otherwise
+            % --- CEL PUȚIN DOUĂ ramuri pasive la acest nod ---
+            % Ecuație generală: suma(incoming) = suma(outgoing)
+            
+            % Construim lista curenților incoming
+            if isempty(incomingIdx)
+                lhs = {'0'};
+            else
+                lhs = cellfun(@(b) ['I' b{1}], branches(incomingIdx), 'UniformOutput', false);
+            end
+            
+            % Construim lista curenților outgoing
+            if isempty(outgoingIdx)
+                rhs = {'0'};
+            else
+                rhs = cellfun(@(b) ['I' b{1}], branches(outgoingIdx), 'UniformOutput', false);
+            end
+            
+            % Concatenează cu „ + ” și adaugă la KCL
+            KCL{end+1} = sprintf('%s = %s', ...
+                strjoin(lhs, ' + '), ...
+                strjoin(rhs, ' + '));
     end
 end
-end
+
+
 
 %% 4. Pregătiri pentru KVL
 numB = numel(branches);
