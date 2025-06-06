@@ -1,13 +1,19 @@
-
 function ecuatii = extractKirchhoff(mat)
-% extractKirchhoff - Extrage ecuațiile Kirchhoff (KCL și KVL) dintr-o matrice de circuit
-%   mat      : cell array m×n cu '0','1', și denumiri de componente ('R1','C1','Ve', etc.)
-%   ecuatii  : structură cu două câmpuri: ecuatii.KCL și ecuatii.KVL (cell arrays de stringuri)
+% extractKirchhoff - Extrage ecuațiile Kirchhoff (paralel, KCL, KVL)
+% dintr-o matrice de circuit “mat” (cell array m×n cu '0','1','R1','C1','Ve', ...).
+%
+%   mat      : cell array m×n în care:
+%                - '0' = celulă liberă
+%                - '1' = fir de conexiune
+%                - 'R1','C1','L1','Ve','E1',… = componente (ramuri)
+%   ecuatii  : struct cu câmpurile:
+%                .parallel : cell array de ecuații de felul 'Ua - Ub = 0'
+%                .KCL      : cell array de ecuații KCL (curenți)
+%                .KVL      : cell array de ecuații KVL (tensiuni)
 
 [rows, cols] = size(mat);
 nodeMap = zeros(rows, cols);
 nodeCount = 0;
-
 %% 1. Flood-fill pentru identificarea nodurilor (doar fire '1')
 for i=1:rows
     for j=1:cols
@@ -114,213 +120,228 @@ for n = 1:nodeCount
 end
 
 
-
-%% 4. Pregătiri pentru KVL
-numB = numel(branches);
-% Graful complet
-Gfull = cell(nodeCount,1);
-for b=1:numB
-    n1=branches{b}{2}; n2=branches{b}{3};
-    Gfull{n1}(end+1)=n2; Gfull{n2}(end+1)=n1;
+%% 1) Identificăm ramurile paralele și forțăm păstrarea unei singure ’coarde’ pentru paralel
+numB=numel(branches);
+% a) Construim o cheie „nesortată” a perechii (n1,n2)
+keyUnordered = cell(numB,1);
+for b = 1:numB
+    n1 = branches{b}{2};
+    n2 = branches{b}{3};
+    if n1 < n2
+        keyUnordered{b} = sprintf('%d_%d', n1, n2);
+    else
+        keyUnordered{b} = sprintf('%d_%d', n2, n1);
+    end
 end
 
-% Arbore pe graful complet (DFS)
-parentFull = zeros(1,nodeCount);
-visited = false(1,nodeCount);
-stack = 1; visited(1)=true;
-while ~isempty(stack)
-    u = stack(end); stack(end) = [];
+% b) Grupăm ramurile care apar sub aceeași cheie
+parallelGroups = cell(0);
+uniqueKeys = unique(keyUnordered);
+for iKey = 1:numel(uniqueKeys)
+    idxs = find(strcmp(keyUnordered, uniqueKeys{iKey}));
+    if numel(idxs) > 1
+        % Avem ≥2 ramuri între aceleași două noduri → sunt paralele
+        parallelGroups{end+1} = idxs;  %#ok<AGROW>
+    end
+end
+
+%% 2) Construim graful neorientat complet (lista de adiacență) 
+Gfull = cell(nodeCount, 1);
+for b = 1:numB
+    n1 = branches{b}{2};
+    n2 = branches{b}{3};
+    Gfull{n1}(end+1) = n2;
+    Gfull{n2}(end+1) = n1;
+end
+
+%% 3) BFS pentru a găsi arborele spanning (parentFull)
+parentFull = zeros(1, nodeCount);
+visited    = false(1, nodeCount);
+queue = 1;
+visited(1) = true;
+headq = 1;
+while headq <= numel(queue)
+    u = queue(headq);
+    headq = headq + 1;
     for v = Gfull{u}
         if ~visited(v)
-            visited(v)=true;
-            parentFull(v)=u;
-            stack(end+1)=v;
+            visited(v) = true;
+            parentFull(v) = u;
+            queue(end+1) = v;
         end
     end
 end
 
-% Determinarea chords (ramuri nu în arborele minimal, dar aici doar semnalăm)
-inTree = false(1,numB);
-for b=1:numB
-    n1=branches{b}{2}; n2=branches{b}{3};
-    if parentFull(n2)==n1 || parentFull(n1)==n2
-        inTree(b)=true;
+%% 4) Identificăm toate ramurile care sunt în arbore (inTree = true/false)
+inTree = false(1, numB);
+for b = 1:numB
+    n1 = branches{b}{2};
+    n2 = branches{b}{3};
+    if parentFull(n2) == n1 || parentFull(n1) == n2
+        inTree(b) = true;
     end
 end
+% Construim lista de muchii a arborelui (numai ramurile cu inTree = true)
+sTree = [];
+tTree = [];
+for b = 1:numB
+    if inTree(b)
+        sTree(end+1) = branches{b}{2};   % nodul de plecare
+        tTree(end+1) = branches{b}{3};   % nodul de sosire
+    end
+end
+
+% Creăm un obiect graph și îl afișăm
+Gtree = graph(sTree, tTree);
+figure;
+plot(Gtree, ...
+     'Layout', 'layered', ...
+     'NodeLabel', arrayfun(@num2str, 1:nodeCount, 'UniformOutput', false), ...
+     'LineWidth', 1.5, ...
+     'MarkerSize', 8);
+title('Arborele spanning extras din Gfull');
+
+%% 5) Din fiecare grup de paralele, forțăm ca exact o ramură să rămână „în arbore”,
+%    iar pe restul le marcăm drept „chords” (coarde). În acest fel nu mai generăm
+%    bucle redundante între C1 și C2, de exemplu.
+for g = 1:numel(parallelGroups)
+    idxs = parallelGroups{g};
+    % De la aceste idxs, fie ramura care este deja inTree = true o păstrăm,
+    % fie dacă toate idxs sunt false, îi setăm pe idxs(1) în arbore și restul false.
+    % Apoi pe idxs(2:end) îi forțăm să fie coarde (inTree = false).
+    
+    % (1) Căutăm dacă există deja una „în arbore”
+    foundInTree = false;
+    for k = idxs
+        if inTree(k)
+            foundInTree = true;
+            break;
+        end
+    end
+    if ~foundInTree
+        % Niciuna nu era în arbore → punem pe prima ca în arbore
+        inTree(idxs(1)) = true;
+    end
+    % (2) pe restul idxs(2:end) le forțăm coarde
+    for k = idxs
+        if k ~= idxs(1)
+            inTree(k) = false;
+        end
+    end
+end
+
+% În acest moment, inTree(b) = true dacă ramura b face parte din arbore,
+% și false dacă ramura b e coardă (inclusiv paralel “suplimentar”).
+
+%% 6) Determinăm lista de coarde (chords)
 chords = find(~inTree);
 
-%% 5. KVL: bucle fundamentale pe baza chords + arbore complet
+%% 7) Construim acum buclele KVL – exact câte o ecuație pentru fiecare cordă rămasă
 KVL = {};
-for c = chords
-    n1 = branches{c}{2}; n2 = branches{c}{3};
-    % Drumul n1->n2 în arbore complet
-    path = n1; u = n1;
-    while (u~=n2 &&u>0)
-        u = parentFull(u);
-        path(end+1) = u;
+for ci = 1:numel(chords)
+    c = chords(ci);
+    n1 = branches{c}{2};
+    n2 = branches{c}{3};
+
+    % 7.a) Reconstruim drumul unic n1→n2 în arbore
+    %     Mai întâi extragem subgraful arborelui (numai ramurile cu inTree = true)
+    treeAdj = cell(nodeCount,1);
+    for bidx = 1:numB
+        if inTree(bidx)
+            a = branches{bidx}{2};
+            b_ = branches{bidx}{3};
+            treeAdj{a}(end+1) = b_;
+            treeAdj{b_}(end+1) = a;
+        end
     end
-    % Ramurile buclei: chord + segmente din arbore
-    loopB = c;
-    for k=1:length(path)-1
-        a=path(k); bnode=path(k+1);
-        for bidx=1:numB
-            x=branches{bidx}{2}; y=branches{bidx}{3};
-            if (x==a&& y==bnode) || (x==bnode && y==a)
-                if inTree(bidx)
-                    loopB(end+1)=bidx;
-                end
+
+    %     Apoi facem un BFS în subgraful arborelui pentru a găsi părinții temporari
+    parTemp = zeros(1, nodeCount);
+    vis2    = false(1, nodeCount);
+    q2 = n1;
+    vis2(n1) = true;
+    head2 = 1;
+    while head2 <= numel(q2)
+        u2 = q2(head2);
+        head2 = head2 + 1;
+        if u2 == n2
+            break;
+        end
+        for nb = treeAdj{u2}
+            if ~vis2(nb)
+                vis2(nb) = true;
+                parTemp(nb) = u2;
+                q2(end+1) = nb;
+            end
+        end
+    end
+
+    %     Reconstruim calea din arbore de la n2 înapoi la n1
+    path = n2;
+    cur  = n2;
+    while cur ~= n1
+        cur = parTemp(cur);
+        path(end+1) = cur;
+    end
+    %     Inversăm ca să fie [n1, …, n2]
+    path = fliplr(path);
+
+    % 7.b) Colectăm index‐ii ramurilor din buclă: corda c + fiecare segment (a→b_) din arbore
+    loopBranches = c;  
+    for k = 1:(numel(path)-1)
+        a  = path(k);
+        b_ = path(k+1);
+        % găsim ramura (bidx) care leagă exact a ↔ b_ în subgraful arbore
+        for bidx = 1:numB
+            x = branches{bidx}{2};
+            y = branches{bidx}{3};
+            if inTree(bidx) && ((x == a && y == b_) || (x == b_ && y == a))
+                loopBranches(end+1) = bidx;
                 break;
             end
         end
     end
- terms = {};
-for idx = loopB
-    lbl = branches{idx}{1};
-    if startsWith(lbl,'Ve') || startsWith(lbl,'E')
-        terms{end+1} = ['-U' lbl];
-    else
-        terms{end+1} = ['U' lbl];
+
+    % 7.c) Construim ecuația KVL cu semnele corespunzătoare
+    terms = {};
+
+    %  7.c.1) Începem cu corda C: bucla este închisă de la n2 → n1 (invers faţă de n1→n2)
+    lbl_c = branches{c}{1};
+    % Direcția naturală a corzii e n1→n2, dar bucla o parcurge n2→n1 → semn „−”
+    terms{end+1} = ['-U' lbl_c];
+
+    %  7.c.2) Apoi parcurgem path de la n1→n2, adăugând fiecare ramură cu semnul
+    for k = 1:(numel(path)-1)
+        a  = path(k);
+        b_ = path(k+1);
+        for bidx = 1:numB
+            x = branches{bidx}{2};
+            y = branches{bidx}{3};
+            if (x == a && y == b_)
+                % ramura merge a→b_, iar bucla merge tot a→b_ → semn „+”
+                lbl = branches{bidx}{1};
+                terms{end+1} = ['+U' lbl];
+                break;
+            elseif (x == b_ && y == a)
+                % ramura are sens natural b_→a, dar bucla merge a→b_ → semn „−”
+                lbl = branches{bidx}{1};
+                terms{end+1} = ['-U' lbl];
+                break;
+            end
+        end
     end
-end
-    KVL{end+1} = [strjoin(terms,' + ') ' = 0'];
-end
 
-%% 6. Return și afișare
-ecuatii.KCL = KCL;
-ecuatii.KVL = KVL;
-disp('Ecuații KCL:'); disp(KCL');
-disp('Ecuații KVL:'); disp(KVL');
+    % 7.d) Încheiem ecuația de buclă
+    KVL{end+1} = [ strjoin(terms) ' = 0' ];
 end
 
+    %% 7. Returnăm și afișăm
 
+    ecuatii.KCL      = KCL(:);
+    ecuatii.KVL      = KVL(:);
 
-% function ecuatii = extractKirchhoff(mat)
-% % extractKirchhoff - Extrage ecuațiile Kirchhoff (KCL și KVL) dintr-o matrice de circuit
-% %   mat      : cell array m×n cu '0','1', și denumiri de componente ('R1','C1','Ve', etc.)
-% %   ecuatii  : structură cu două câmpuri: ecuatii.KCL și ecuatii.KVL (cell arrays de stringuri)
-% 
-% [rows, cols] = size(mat);
-% nodeMap = zeros(rows, cols);
-% nodeCount = 0;
-% 
-% %% 1. Flood-fill pentru identificarea nodurilor (doar fire '1')
-% for i=1:rows
-%     for j=1:cols
-%         if strcmp(mat{i,j}, '1') && nodeMap(i,j)==0
-%             nodeCount = nodeCount + 1;
-%             cells = floodFill(mat, i, j, rows, cols);
-%             for k=1:size(cells,1)
-%                 nodeMap(cells(k,1), cells(k,2)) = nodeCount;
-%             end
-%         end
-%     end
-% end
-% 
-% %% 2. Identificarea ramurilor (componente) și nodurile conectate
-% branches = {};  % fiecare: {label, node1, node2}
-% for i=1:rows
-%     for j=1:cols
-%         label = mat{i,j};
-%         if ~strcmp(label,'0') && ~strcmp(label,'1')
-%             neigh = getAdjacentNodes(nodeMap, i, j, rows, cols);
-%             if numel(neigh)==2
-%                 branches{end+1} = {label, neigh(1), neigh(2)};
-%             end
-%         end
-%     end
-% end
-% 
-% %% 3. KCL: legea curentului pentru fiecare nod cu >=2 ramuri
-% KCL = {};
-% for n=1:nodeCount
-%     inc = cellfun(@(b) b{2}==n || b{3}==n, branches);
-%     if sum(inc)>1
-%     % Excludem sursele de tensiune (Ve, E1, etc.) din legea curentului
-%     valid = branches(inc);
-%     valid = valid(~cellfun(@(b) startsWith(b{1}, 'Ve') || startsWith(b{1}, 'E'), valid));
-%     if numel(valid)>1
-%         terms = cellfun(@(b)['i' b{1}], valid, 'UniformOutput',false);
-%         KCL{end+1} = strjoin(terms, ' = ');
-%     end
-% end
-% 
-% end
-% 
-% %% 4. Pregătiri pentru KVL
-% numB = numel(branches);
-% % Graful complet
-% Gfull = cell(nodeCount,1);
-% for b=1:numB
-%     n1=branches{b}{2}; n2=branches{b}{3};
-%     Gfull{n1}(end+1)=n2; Gfull{n2}(end+1)=n1;
-% end
-% 
-% % Arbore pe graful complet (DFS)
-% parentFull = zeros(1,nodeCount);
-% visited = false(1,nodeCount);
-% stack = 1; visited(1)=true;
-% while ~isempty(stack)
-%     u = stack(end); stack(end) = [];
-%     for v = Gfull{u}
-%         if ~visited(v)
-%             visited(v)=true;
-%             parentFull(v)=u;
-%             stack(end+1)=v;
-%         end
-%     end
-% end
-% 
-% % Determinarea chords (ramuri nu în arborele minimal, dar aici doar semnalăm)
-% inTree = false(1,numB);
-% for b=1:numB
-%     n1=branches{b}{2}; n2=branches{b}{3};
-%     if parentFull(n2)==n1 || parentFull(n1)==n2
-%         inTree(b)=true;
-%     end
-% end
-% chords = find(~inTree);
-% 
-% %% 5. KVL: bucle fundamentale pe baza chords + arbore complet
-% KVL = {};
-% for c = chords
-%     % 1) găseşti path-ul în arbore complet
-% n1 = branches{c}{2};
-% n2 = branches{c}{3};
-%     path = findPath(Gfull, n1, n2);
-%     if isempty(path)
-%         error('Nu există drum complet între nodurile %d și %d.', n1, n2);
-%     end
-% 
-% 
-%     % 2) traversezi path-ul și semnezi
-%     terms = {};
-% for k = 1:length(path)-1
-%     a = path(k); bnode = path(k+1);
-%     for idx = 1:numB
-%         br = branches{idx};
-%         lbl = br{1};
-%         n1  = br{2};
-%         n2  = br{3};
-%         if n1 == a && n2 == bnode
-%             terms{end+1} = ['+U' lbl];
-%             break;
-%         elseif n1 == bnode && n2 == a
-%             terms{end+1} = ['-U' lbl];
-%             break;
-%         end
-%     end
-% end
-% 
-%     eq = strjoin(terms, ' ');
-%     if startsWith(eq, '+'), eq = extractAfter(eq,1); end
-%     KVL{end+1} = [eq ' = 0'];
-% end
-% 
-% 
-% %% 6. Return și afișare
-% ecuatii.KCL = KCL;
-% ecuatii.KVL = KVL;
-% disp('Ecuații KCL:'); disp(KCL');
-% disp('Ecuații KVL:'); disp(KVL');
-% end
-% 
+    disp('Ecuații KCL:');        disp(ecuatii.KCL);
+    disp('Ecuații KVL:');        disp(ecuatii.KVL);
+
+    % extractKVL_general(mat);
+end
