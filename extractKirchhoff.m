@@ -1,4 +1,4 @@
-function ecuatii = extractKirchhoff(mat)
+function [KCL,KVL] = extractKirchhoff(mat)
 % extractKirchhoff - Extrage ecuațiile Kirchhoff (paralel, KCL, KVL)
 % dintr-o matrice de circuit “mat” (cell array m×n cu '0','1','R1','C1','Ve', ...).
 %
@@ -28,94 +28,48 @@ for i=1:rows
     end
 end
 
-%% 2. Identificarea ramurilor (componente) și nodurile conectate
-branches = {};  % fiecare: {label, node1, node2}
+%% 2. Identificarea ramurilor (cu direcție canonică)
+branches = {};  % fiecare: {label, node_min, node_max}
 for i=1:rows
     for j=1:cols
         label = mat{i,j};
+        if ~ischar(label), label = char(label); end % Asigură că e char
         if ~strcmp(label,'0') && ~strcmp(label,'1')
             neigh = getAdjacentNodes(nodeMap, i, j, rows, cols);
             if numel(neigh)==2
-                branches{end+1} = {label, neigh(1), neigh(2)};
+                % REGULA CANONICĂ: Stocăm mereu nodurile în ordine crescătoare
+                node_min = min(neigh);
+                node_max = max(neigh);
+                branches{end+1} = {label, node_min, node_max};
             end
         end
     end
 end
- visualiseGraph(branches)
-%% 3. KCL: legea curentului pentru fiecare nod
+% Eliminăm ramurile duplicate care pot apărea din cauza componentelor întinse
+[~, unique_indices] = unique(cellfun(@(c) c{1}, branches, 'UniformOutput', false));
+branches = branches(unique_indices);
+
+visualiseGraph(branches);
+%% 3. KCL: Legea curentului pentru fiecare nod (metoda robustă)
 KCL = {};
 for n = 1:nodeCount
-    % 3.a) Găsim toate ramurile care ating nodul n (inclusiv surse)
-    ramIndices = find(cellfun(@(b) (b{2} == n) || (b{3} == n), branches));
-    if isempty(ramIndices)
-        continue;  % nod fără ramuri
+    % Găsim toate ramurile conectate la nodul 'n'
+    connected_branches = {};
+    for k = 1:numel(branches)
+        if branches{k}{2} == n || branches{k}{3} == n
+            % Excludem sursele de tensiune pure (V, E) din KCL
+            label = branches{k}{1};
+            if ~startsWith(label, 'V') && ~startsWith(label, 'E')
+                connected_branches{end+1} = ['I_' label];
+            end
+        end
     end
     
-    % 3.b) Excludem complet sursele de tensiune (prefix V sau E)
-    isPassive = ~cellfun(@(b) startsWith(b{1}, 'V') || startsWith(b{1}, 'E'), branches(ramIndices));
-    nonSrcIdx = ramIndices(isPassive);
-    if isempty(nonSrcIdx)
-        continue;  % după excluderea surselor nu mai rămâne nicio ramură pasivă
-    end
-    
-    % 3.c) Împărțim ramurile pasive în două categorii:
-    %      incomingIdx = acele ramuri care ajung în nod (b{3} == n)
-    %      outgoingIdx = acele ramuri care pleacă din nod (b{2} == n)
-    incomingMask = cellfun(@(b) (b{3} == n), branches(nonSrcIdx));
-    incomingIdx = nonSrcIdx(incomingMask);
-    outgoingIdx = nonSrcIdx(~incomingMask);
-    
-    % 3.d) Scriem ecuația în funcție de numărul de ramuri pasive
-    switch numel(nonSrcIdx)
-        case 1
-            % --- EXACT O SINGURĂ ramură pasivă la acest nod ---
-            k = nonSrcIdx;       % indexul acelei singure ramuri
-            lbl = branches{k}{1};% eticheta, ex. 'R1'
-            
-            if ~isempty(incomingIdx) && isempty(outgoingIdx)
-                % Situație: exact o singură ramură și ea e incoming
-                % Ilbl = suma tuturor curenților outgoing (dar nu există outgoing)
-                % => pur și simplu Ilbl = 0 nu are sens fizic în KCL
-                % scriem: Ilbl = (nimic)  → implicit Ilbl = 0, dar mai bine ignorăm
-                % DECIDEM: nu generăm ecuație în acest caz (de obicei nu apare
-                % “doar o singură ramură pasivă” într-un circuit normal).
-                continue;
-                
-            elseif isempty(incomingIdx) && ~isempty(outgoingIdx)
-                % Situație: exact o singură ramură și ea e outgoing
-                % => (suma incoming) = Ilbl, dar incoming e vidă
-                % => 0 = Ilbl, iar Ilbl nu poate fi 0 fizic
-                % DECIDEM: nu generăm ecuație
-                continue;
-                
-            elseif ~isempty(incomingIdx) && ~isempty(outgoingIdx)
-                % Practic cam imposibil: dacă există o singură ramură pasivă,
-                % nu poate fi în același timp și incoming, și outgoing.
-                continue;
-            end
-            
-        otherwise
-            % --- CEL PUȚIN DOUĂ ramuri pasive la acest nod ---
-            % Ecuație generală: suma(incoming) = suma(outgoing)
-            
-            % Construim lista curenților incoming
-            if isempty(incomingIdx)
-                lhs = {'0'};
-            else
-                lhs = cellfun(@(b) ['I' b{1}], branches(incomingIdx), 'UniformOutput', false);
-            end
-            
-            % Construim lista curenților outgoing
-            if isempty(outgoingIdx)
-                rhs = {'0'};
-            else
-                rhs = cellfun(@(b) ['I' b{1}], branches(outgoingIdx), 'UniformOutput', false);
-            end
-            
-            % Concatenează cu „ + ” și adaugă la KCL
-            KCL{end+1} = sprintf('%s = %s', ...
-                strjoin(lhs, ' + '), ...
-                strjoin(rhs, ' + '));
+    % Dacă nodul are cel puțin o conexiune validă, scriem ecuația
+    if numel(connected_branches) > 1
+        % Ecuatia este: I_comp1 + I_comp2 + ... = 0
+        equation_str = [strjoin(connected_branches, ' + ') ' = 0'];
+        KCL{end+1} = equation_str;
     end
 end
 
@@ -236,112 +190,125 @@ end
 %% 6) Determinăm lista de coarde (chords)
 chords = find(~inTree);
 
-%% 7) Construim acum buclele KVL – exact câte o ecuație pentru fiecare cordă rămasă
-KVL = {};
-for ci = 1:numel(chords)
-    c = chords(ci);
-    n1 = branches{c}{2};
-    n2 = branches{c}{3};
-
-    % 7.a) Reconstruim drumul unic n1→n2 în arbore
-    %     Mai întâi extragem subgraful arborelui (numai ramurile cu inTree = true)
-    treeAdj = cell(nodeCount,1);
-    for bidx = 1:numB
-        if inTree(bidx)
-            a = branches{bidx}{2};
-            b_ = branches{bidx}{3};
-            treeAdj{a}(end+1) = b_;
-            treeAdj{b_}(end+1) = a;
-        end
+% Creăm lista de adiacență DOAR pentru ramurile din arborele de acoperire
+treeAdj = cell(nodeCount, 1);
+for bidx = 1:numel(branches)
+    if inTree(bidx)
+        n1 = branches{bidx}{2};
+        n2 = branches{bidx}{3};
+        treeAdj{n1}(end+1) = n2;
+        treeAdj{n2}(end+1) = n1;
     end
-
-    %     Apoi facem un BFS în subgraful arborelui pentru a găsi părinții temporari
-    parTemp = zeros(1, nodeCount);
-    vis2    = false(1, nodeCount);
-    q2 = n1;
-    vis2(n1) = true;
-    head2 = 1;
-    while head2 <= numel(q2)
-        u2 = q2(head2);
-        head2 = head2 + 1;
-        if u2 == n2
-            break;
-        end
-        for nb = treeAdj{u2}
-            if ~vis2(nb)
-                vis2(nb) = true;
-                parTemp(nb) = u2;
-                q2(end+1) = nb;
-            end
-        end
-    end
-
-    %     Reconstruim calea din arbore de la n2 înapoi la n1
-    path = n2;
-    cur  = n2;
-    while cur ~= n1
-        cur = parTemp(cur);
-        path(end+1) = cur;
-    end
-    %     Inversăm ca să fie [n1, …, n2]
-    path = fliplr(path);
-
-    % 7.b) Colectăm index‐ii ramurilor din buclă: corda c + fiecare segment (a→b_) din arbore
-    loopBranches = c;  
-    for k = 1:(numel(path)-1)
-        a  = path(k);
-        b_ = path(k+1);
-        % găsim ramura (bidx) care leagă exact a ↔ b_ în subgraful arbore
-        for bidx = 1:numB
-            x = branches{bidx}{2};
-            y = branches{bidx}{3};
-            if inTree(bidx) && ((x == a && y == b_) || (x == b_ && y == a))
-                loopBranches(end+1) = bidx;
-                break;
-            end
-        end
-    end
-
-    % 7.c) Construim ecuația KVL cu semnele corespunzătoare
-    terms = {};
-
-    %  7.c.1) Începem cu corda C: bucla este închisă de la n2 → n1 (invers faţă de n1→n2)
-    lbl_c = branches{c}{1};
-    % Direcția naturală a corzii e n1→n2, dar bucla o parcurge n2→n1 → semn „−”
-    terms{end+1} = ['-U' lbl_c];
-
-    %  7.c.2) Apoi parcurgem path de la n1→n2, adăugând fiecare ramură cu semnul
-    for k = 1:(numel(path)-1)
-        a  = path(k);
-        b_ = path(k+1);
-        for bidx = 1:numB
-            x = branches{bidx}{2};
-            y = branches{bidx}{3};
-            if (x == a && y == b_)
-                % ramura merge a→b_, iar bucla merge tot a→b_ → semn „+”
-                lbl = branches{bidx}{1};
-                terms{end+1} = ['+U' lbl];
-                break;
-            elseif (x == b_ && y == a)
-                % ramura are sens natural b_→a, dar bucla merge a→b_ → semn „−”
-                lbl = branches{bidx}{1};
-                terms{end+1} = ['-U' lbl];
-                break;
-            end
-        end
-    end
-
-    % 7.d) Încheiem ecuația de buclă
-    KVL{end+1} = [ strjoin(terms) ' = 0' ];
 end
 
-    %% 7. Returnăm și afișăm
+% OPTIMIZARE: Sortăm coardele după lungimea geometrică pentru a favoriza buclele mici
 
-    ecuatii.KCL      = KCL(:);
-    ecuatii.KVL      = KVL(:);
+chord_lengths = [];
+for k = 1:numel(chords)
+    chord_idx = chords(k);
+    
+    % Găsim nodurile corzii
+    n1 = branches{chord_idx}{2};
+    n2 = branches{chord_idx}{3};
+    
+    % Găsim coordonatele de pe grilă ale blocurilor de la capetele corzii
+    % (Aici presupunem că fiecare nod are un bloc asociat - ar trebui să fie
+    % adevărat pentru capetele unei coarde, care sunt componente)
+    
+    % Cautam blocurile care definesc nodurile n1 si n2
+    % Aceasta este o căutare inversă; poate dura puțin.
+    % coord1 = []; coord2 = [];
+    % keys = blockGridCoords.keys;
+    % for i_key = 1:numel(keys)
+    %     coords = blockGridCoords(keys{i_key});
+    %     % Trebuie să găsim ce bloc este conectat la nodul n1 și n2
+    %     % Acest pas este complicat. O alternativă mai simplă...
+    % end
+    % 
+    % O METODĂ MULT MAI SIMPLĂ:
+    % Găsim direct coordonatele nodurilor din matricea 'nodeMap'
+    % (prima apariție a numărului nodului)
+    [r1, c1] = find(nodeMap == n1, 1, 'first');
+    [r2, c2] = find(nodeMap == n2, 1, 'first');
+    
+    if ~isempty(r1) && ~isempty(r2)
+        % Calculăm distanța euclidiană la pătrat (e suficientă pentru sortare)
+        dist_sq = (r1-r2)^2 + (c1-c2)^2;
+        chord_lengths(end+1) = dist_sq;
+    else
+        chord_lengths(end+1) = inf; % Coardă fără coordonate, o punem la final
+    end
+end
 
-    disp('Ecuații KCL:');        disp(ecuatii.KCL);
-    disp('Ecuații KVL:');        disp(ecuatii.KVL);
+% Sortăm indicii corzilor pe baza lungimilor calculate
+[~, sorted_indices] = sort(chord_lengths);
+chords = chords(sorted_indices);
+
+
+%% 7) Construim buclele KVL – câte o ecuație pentru fiecare coardă
+KVL = {};
+for ci = 1:numel(chords)
+    chord_idx = chords(ci);
+    
+    % Nodurile corzii (direcția de referință este n_min -> n_max)
+    chord_n_min = branches{chord_idx}{2};
+    chord_n_max = branches{chord_idx}{3};
+    
+    % Găsim drumul unic în arbore între nodurile corzii
+    path = findPathInTree(treeAdj, chord_n_min, chord_n_max, nodeCount);
+    if isempty(path), continue, end % Nu s-a găsit drum, ar fi o eroare în arbore
+    
+    % Bucla este formată din drumul din arbore (n_min -> n_max) și coarda (n_max -> n_min)
+    
+    % Termenul pentru coardă: drumul prin arbore e n_min->n_max, deci bucla
+    % se închide prin coardă de la n_max înapoi la n_min. Acesta este sensul
+    % INVERS direcției de referință a corzii. Deci, semnul este '-'.
+    terms = {['-U_' branches{chord_idx}{1}]};
+
+    % Parcurgem drumul din arbore de la n_min la n_max
+    for k = 1:(numel(path)-1)
+        path_node1 = path(k);
+        path_node2 = path(k+1);
+        
+        % Găsim ramura din arbore care leagă aceste două noduri
+        branch_in_path_idx = findBranch(branches, inTree, path_node1, path_node2);
+        if isempty(branch_in_path_idx), continue, end
+        
+        branch_label = branches{branch_in_path_idx}{1};
+        branch_n_min = branches{branch_in_path_idx}{2};
+        
+        % Stabilim semnul
+        % Dacă drumul (path_node1 -> path_node2) este în aceeași direcție
+        % cu direcția de referință a ramurii (branch_n_min -> branch_n_max)...
+        if path_node1 == branch_n_min
+            % ...atunci căderea de tensiune se adună (semn +)
+            terms{end+1} = ['+U_' branch_label];
+        else
+            % ...altfel, mergem împotriva direcției de referință, deci se scade (semn -)
+            terms{end+1} = ['-U_' branch_label];
+        end
+    end
+    
+    % Curățăm primul termen dacă are un '+' la început
+    if startsWith(terms{1}, '+')
+        terms{1} = terms{1}(2:end);
+    end
+    
+    KVL{end+1} = [strjoin(terms, ' ') ' = 0'];
+end
+
+% Funcții ajutătoare de adăugat la sfârșitul fișierului sau ca funcții private
+
+
+
+
+    %% 8. Returnăm și afișăm
+
+    KCL = KCL(:);
+    KVL = KVL(:);
+
+    disp('Ecuații KCL:');        disp(KCL);
+    disp('Ecuații KVL:');        disp(KVL);
 
     % extractKVL_general(mat);
 end

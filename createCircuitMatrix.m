@@ -1,5 +1,4 @@
-
-function diagMat = createCircuitMatrixWithConnections()
+function diagMat = createCircuitMatrix()
 % createCircuitMatrixWithConnections - Creează o reprezentare matricială
 % simplificată a diagramei din modelul Simulink specificat, incluzând
 % atât blocurile R, L, C, cât și legăturile dintre ele (marcate cu '1').
@@ -17,15 +16,14 @@ function diagMat = createCircuitMatrixWithConnections()
 %   disp(M);
 
 % 1. Găsește blocurile R, L și C
-modelName='CalCulator_ModelMatematic_Test';
-rBlocks = find_system(modelName, 'Regexp', 'on', 'Name', '^R');
-lBlocks = find_system(modelName, 'Regexp', 'on', 'Name', '^I');
-cBlocks = find_system(modelName, 'Regexp', 'on', 'Name', '^C');
-uBlocks = find_system(modelName, 'Regexp', 'on', 'Name', '^V');
-yBlocks = find_system(modelName, 'Regexp', 'on', 'Name', '^E');
+modelName=bdroot()
+rBlocks = find_system(modelName, 'Regexp', 'on', 'Name', '^Resistor');
+lBlocks = find_system(modelName, 'Regexp', 'on', 'Name', '^Inductor');
+cBlocks = find_system(modelName, 'Regexp', 'on', 'Name', '^Capacitor');
+uyBlocks = find_system(modelName, 'Regexp', 'on', 'Name', '^Voltage');
 
 
-allBlocks = [rBlocks; lBlocks; cBlocks; uBlocks;yBlocks];
+allBlocks = [rBlocks; lBlocks; cBlocks; uyBlocks];
 
 if isempty(allBlocks)
     error('Nu s-au găsit blocuri R, L sau C în modelul %s.', modelName);
@@ -49,7 +47,11 @@ for i = 1:length(allBlocks)
     % Presupunem că primul caracter din nume definește tipul
     blkName = get_param(allBlocks{i}, 'Name');
     if ~isempty(blkName)
-        types{end+1} = [blkName(1) blkName(end)];  % ex.: 'R', 'L', 'C'
+        if(blkName(end)=='r' || blkName(end) == 'e')
+            types{end+1} = [blkName(1) '0'];
+        else
+             types{end+1} = [blkName(1) blkName(end)];  % ex.: 'R', 'L', 'C'
+        end
     else
         types{end+1} = "0";
     end
@@ -59,82 +61,115 @@ if isempty(centers)
     error('Niciun bloc valid cu parametrul "Position" nu a fost găsit.');
 end
 
-% 3. Definirea grilei
+
+% 2.5: Colectarea tuturor coordonatelor (blocuri + linii)
+all_line_points = [];
+lineHandles = find_system(modelName, 'FindAll', 'on', 'type', 'line');
+for i = 1:length(lineHandles)
+    pts = get_param(lineHandles(i), 'Points');
+    if ~isempty(pts)
+        all_line_points = [all_line_points; pts];
+    end
+end
+
+% Combină coordonatele centrelor blocurilor cu cele ale punctelor de pe linii
+if isempty(all_line_points)
+    all_coords = centers;
+else
+    all_coords = [centers; all_line_points];
+end
+
+
+% 3. Definirea grilei pe baza limitelor globale
 gridSize = 40;  % dimensiunea celulei în pixeli
-minX = floor(min(centers(:,1)) / gridSize);
-maxX = ceil(max(centers(:,1)) / gridSize);
-minY = floor(min(centers(:,2)) / gridSize);
-maxY = ceil(max(centers(:,2)) / gridSize);
+
+% Calculează limitele din TOATE coordonatele (blocuri + linii)
+minX = floor(min(all_coords(:,1)) / gridSize);
+maxX = ceil(max(all_coords(:,1)) / gridSize);
+minY = floor(min(all_coords(:,2)) / gridSize);
+maxY = ceil(max(all_coords(:,2)) / gridSize);
 
 numCols = maxX - minX + 1;
 numRows = maxY - minY + 1;
 
-% Inițial, matricea este completată cu '0' (celule libere)
-diagMat = repmat("0", numRows+1, numCols+1);
 
-% 4. Plasează blocurile în matrice
-% Inițial, creează un cell array completat cu stringuri goale
-%diagMat = repmat({'0'}, numRows, numCols);
+% 4. Plasează blocurile în matrice și salvează coordonatele lor
+diagMat = repmat("0", numRows, numCols); % Am scos +1 pentru o grilă exactă
+
+% Creează un Map pentru a stoca coordonatele blocurilor
+blockGridCoords = containers.Map('KeyType','char','ValueType','any');
 
 for i = 1:size(centers,1)
-    % Mapare din coordonate în pixeli la indici de grilă:
     colIdx = floor(centers(i,1) / gridSize) - minX + 1;
     rowIdx = floor(centers(i,2) / gridSize) - minY + 1;
-    % Inversăm rândurile pentru a avea 0 sus (coincide cu coordonatele vizuale)%
-    %rowIdx = numRows - rowIdx + 1;
     
     diagMat(rowIdx, colIdx) = types{i};
+    
+    % Salvează coordonatele în hartă, folosind calea completă a blocului ca cheie
+    blockGridCoords(allBlocks{i}) = [colIdx, rowIdx];
 end
 
-% 5. Desenează conexiunile dintre blocuri
-% Obține toate liniile din model
-lineHandles = find_system(modelName, 'FindAll', 'on', 'type', 'line');
+
+% 5. Desenează conexiunile (corpul liniei + ancorarea la blocuri)
+% lineHandles = find_system(modelName, 'FindAll', 'on', 'type', 'line');
 
 for i = 1:length(lineHandles)
-    try
-        pts = get_param(lineHandles(i), 'Points');  % Matrice de puncte [x y]
-    catch
-        continue;
-    end
-    if isempty(pts) || size(pts,2) < 2
-        continue;
-    end
+    lh = lineHandles(i);
     
-    % Pentru fiecare segment de linie (între punctele consecutive)
+    % Obține geometria completă a liniei
+    pts = get_param(lh, 'Points');
+    if isempty(pts) || size(pts,1) < 2, continue, end
+    
+    % --- Pasul A: Desenează corpul liniei (logica ta originală) ---
     for k = 1:size(pts,1)-1
         p1 = pts(k,:);
         p2 = pts(k+1,:);
         
-        % Mapare la indici de grilă pentru p1
         col1 = floor(p1(1) / gridSize) - minX + 1;
         row1 = floor(p1(2) / gridSize) - minY + 1;
-       % row1 = numRows - row1 + 1;
-        
-        % Mapare la indici de grilă pentru p2
         col2 = floor(p2(1) / gridSize) - minX + 1;
         row2 = floor(p2(2) / gridSize) - minY + 1;
-       % row2 = numRows - row2 + 1;
-
-        % Obține toate celulele de pe segmentul dintre (col1, row1) și (col2, row2)
-        coords = bresenham(col1, row1, col2, row2);
         
-        % Asigură-te că ultima coordonată (endpoint-ul) este inclusă
-        if isempty(coords) || ~isequal(coords(end,:), [col2, row2])
-            coords(end+1,:) = [col2, row2];
-        end
+        coords = bresenham(col1, row1, col2, row2);
         
         for j = 1:size(coords,1)
             rIdx = coords(j,2);
             cIdx = coords(j,1);
-            % Verifică dacă coordonata este validă în matrice
             if rIdx >= 1 && rIdx <= numRows && cIdx >= 1 && cIdx <= numCols
-                % Dacă celula este liberă ('0'), o marchez cu '1'
                 if diagMat(rIdx, cIdx) == "0"
                     diagMat(rIdx, cIdx) = "1";
                 end
             end
         end
+    end
     
+    % --- Pasul B: Ancorează capătul liniei de blocurile destinație ---
+    dstBlockHandles = get_param(lh, 'DstBlockHandle');
+    if all(dstBlockHandles == -1), continue, end
+    
+    % Coordonatele de pe grilă ale capătului liniei
+    line_end_point = pts(end,:);
+    line_end_col = floor(line_end_point(1) / gridSize) - minX + 1;
+    line_end_row = floor(line_end_point(2) / gridSize) - minY + 1;
+        
+    for k = 1:length(dstBlockHandles)
+        dstBlkH = dstBlockHandles(k);
+        if dstBlkH == -1, continue, end
+        
+        % Găsește calea completă a blocului destinație
+        dstBlkPath = getfullname(dstBlkH);
+        
+        % Verifică dacă avem coordonatele pentru acest bloc
+        if isKey(blockGridCoords, dstBlkPath)
+            % Obține coordonatele salvate ale blocului
+            block_coords = blockGridCoords(dstBlkPath);
+            block_col = block_coords(1);
+            block_row = block_coords(2);
+            
+            % Desenează o linie de legătură de la capătul liniei la bloc
+            anchor_coords = bresenham(line_end_col, line_end_row, block_col, block_row);
+                  
+        end
     end
 end
 

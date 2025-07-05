@@ -1,4 +1,4 @@
-function visualiseDirectedCircuit(branches)
+function visualiseGraph(branches)
     % branches: cell array { {label, n1, n2}, ... }
     %
     % Construim un graf orientat în care fiecare muchie

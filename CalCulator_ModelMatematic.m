@@ -4,51 +4,68 @@ clear
 close all
 
 mat = createCircuitMatrix()
-%[KCL,KVL]=generate_kirchhoff_equations(mat)
-% plot_circuit_graph(mat)
+%   [KCL, KVL]=extractKirchhoff(mat);
+ [KCL, KVL]=generateKirchhoffFromMatrix(mat);
 
 
-  % khirchoffs=extractKirchhoff(mat);
-% 1) Definirea ecuațiilor Kirchhoff (stringuri)
-khirchoffs.KCL = {
-    'I_Rr1 = I_C1'
-    'I_Rr1 = I_R2'
-    'I_C1 = I_R2'
-    'I_Rr = I_Ir'
-    'I_Ir = I_Cr + I_R1'
-    %  Observație: nu adăugăm „+ I_V1”, pentru că tu ai spus că
-    %   V1 nu e rezistență, ci doar tensiune de ieșire.
-};
-khirchoffs.KVL = {
-    'U_Cr + U_Rr + U_Ir - U_Ve = 0';  % bucla Rr–Lr–Ve
-     'U_R2 - U_V1 = 0';  
-     '  U_R2 + U_R1 + U_C1 - U_Cr = 0'   % bucla Lr–Cr
-             % bucla Cr–V1 (nodul de ieșire)
-};
+  kirchoffs.KCL=KCL;
+ kirchoffs.KVL=KVL;
 
-% 2) Lista componentelor (fără V1 ca 'Vout')
-comps = {
-    struct('name','Rr','type','R','param','Rr');
-    struct('name','R1','type','R','param','R1');
-    struct('name','R2','type','R','param','R2');
+%%
+% % 1) Definirea ecuațiilor Kirchhoff (stringuri)
+% close all
+% clc
+% kirchoffs.KCL = { 
+% 'I_C0 +I_I0 +I_I1 = 0' 
+%     '-I_C0 -I_I1 +I_R1 = 0'
+%     'I_I0 -I_R0 = 0'      
+%     '-I_I2 -I_C1 +I_R2 = 0'
+%     'I_C1 - I_R2 = 0'
+% };
+% kirchoffs.KVL = {
+% 'U_C0 - U_I1 = 0'                        
+%     'U_R1 - U_V1 = 0'                        
+%     '-U_C1 +U_I2 +U_R2 = 0'                  
+%     '-U_V0 +U_R0 -U_I0 +U_C0 +U_R1 -U_I2 = 0'
+% 
+% 
+% };
 
-    struct('name','Ir','type','L','param','Lr');
-    struct('name','Cr','type','C','param','Cr');
-    struct('name','C1','type','C','param','C1');
+[state_vars,comps]=getStateVars(kirchoffs);
 
-    struct('name','Ve','type','Vsrc','param','Ve');
-};
-
-% 3) Definirea stărilor și intrărilor
-state_vars = {'U_Cr','U_C1','I_Ir'};  % tensiunea pe C și curentul prin L
-input_vars = {'Ve'};           % Ve(t) – tensiunea de intrare
-output_vars = {'V1'};          % V1(t) – ieșirea = tensiune nod
+%  Definirea intrărilor si iesirilor
+% Constrangere: V0 va fi intotdeauna intrarea si V1 intotdeauna iesirea
+% Daca nu se respecta aceasta constrangere trebui schimbat in sectiunea 3
+% de generare KCL, si in getStateVars, filtrul de excludere a V1
+ input_vars = {'V0'};           % V0(t) – tensiunea de intrare
+ output_vars = {'V1'};          % V1(t) – ieșirea = tensiune nod
 
 % 4) Apelul funcției
-[A,B,C,D, Xs, Us] = kirchhoff_to_statespace_linear_eliminate( ...
-    khirchoffs, comps, state_vars, input_vars, output_vars);
+ [A,B,C,D] =kirchhoff_to_statespace(kirchoffs, comps, state_vars, input_vars, output_vars)
+%%
+% disp('A = '); disp(simplify(A));
+% disp('B = '); disp(simplify(B));
+% disp('C = '); disp(simplify(C));
+% disp('D = '); disp(simplify(D));
 
-disp('A = '); disp(simplify(A));
-disp('B = '); disp(simplify(B));
-disp('C = '); disp(simplify(C));
-disp('D = '); disp(simplify(D));
+
+syms R0 R1 C0 C1 R2 I0
+R0_var=1000;
+R1_var=500;
+R2_var=750;
+C0_var=100e-6;
+C1_var=10e-6;
+I0_var=1;
+
+A=double(subs(A,{R0,R1,R2,C0,C1,I0},{R0_var,R1_var,R2_var,C0_var,C1_var,I0_var}));
+B=double(subs(B,{R0,R1,R2,C0,C1,I0},{R0_var,R1_var,R2_var,C0_var,C1_var,I0_var}));
+C=double(subs(C,{R0,R1,R2,C0,C1,I0},{R0_var,R1_var,R2_var,C0_var,C1_var,I0_var}));
+D=double(D);
+
+
+syms s
+H=tf("s")
+
+Hf= minreal(zpk(C*((H*eye(size(A))-A)^-1)*B+D))
+
+step(feedback(Hf,1))

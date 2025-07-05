@@ -1,72 +1,81 @@
 function [A,B,C,D,state_syms,input_syms] = kirchhoff_to_statespace( ...
     khirchoffs, comps, state_vars, input_vars, output_vars)
 % kirchhoff_to_statespace_linear_eliminate  
-%   Generează matricile A,B,C,D pentru un circuit liniar R-L-C, 
-%   eliminând necunoscutele algebrice prin rezolvare liniară (fără solve).
+%   Generează matricile A,B,C,D ale unui circuit R-L-C cu intrare/ieșire,
+%   eliminând necunoscutele algebrice (curenți prin rezistori şi tensiuni de ieșire)
+%   în mod explicit, fără a se baza pe symvar sau atoms(symfun).
 %
 % Intrări:
-%   khirchoffs   - struct cu două câmpuri:
-%                    KCL: cell array de şiruri (ecuaţii KCL)
-%                    KVL: cell array de şiruri (ecuaţii KVL)
-%   comps        - cell array de structuri cu câmpurile:
-%                    .name  (şir, ex 'R1', 'L2', 'C3', 'Ve' etc.)
+%   khirchoffs   - struct cu:
+%                    .KCL (cell array de șiruri, ex {'I_Rr=I_Ir+I_Cr'})
+%                    .KVL (cell array de șiruri, ex {'U_Rr+U_Ir-U_Ve=0', 'U_Cr-U_Ir=0', 'U_Cr-U_V1=0'})
+%   comps        - cell array de structuri, fiecare cu:
+%                    .name  (șir, ex 'Rr','Ir','Cr','Ve' etc.)
 %                    .type  ('R','C','L','Vsrc','Isrc')
-%                    .param (şir cu parametru simbolic, ex 'R1','L2','C3','Ve')
-%   state_vars   - cell array de şiruri cu numele variabilelor de stare, ex {'U_C3','I_L2'}
-%   input_vars   - cell array de şiruri cu numele intrărilor, ex {'Ve','Ie'}. 
-%   output_vars  - cell array de şiruri cu numele ieșirilor, ex {'Vout'} sau {'U_C3'}.
+%                    .param (șir cu numele simbolic, ex 'Rr','Crr','Lr','Ve')
+%   state_vars   - cell array de șiruri cu stările, ex {'U_Cr','I_Ir'}
+%   input_vars   - cell array de șiruri cu intrările, ex {'Ve','Ie'}
+%   output_vars  - cell array de șiruri cu ieșirile, ex {'V1'} sau {'U_Cr'} (fără prefix 'U_')
 %
 % Ieșiri:
-%   A,B           - matricile state-space din ẋ = A*x + B*u
-%   C,D           - matricile y   = C*x + D*u
-%   state_syms    - vector simbolic al stărilor ca funcţii de timp [U_C3(t); I_L2(t); …]
-%   input_syms    - vector simbolic al intrărilor ca funcţii de timp [Ve(t); Ie(t); …]
+%   A,B          - matricile state-space (ẋ = A x + B u)
+%   C,D          - matricile pentru ieșire (y = C x + D u)
+%   state_syms   - vector simbolic cu stările (funcții de timp) [U_Cr(t); I_Ir(t); …]
+%   input_syms   - vector simbolic cu intrările (funcții de timp) [Ve(t); Ie(t); …]
 %
-% Schema algoritmului:
-%   1) Transformăm ecuațiile KCL/KVL în ecuații simbolice (str2sym + regexprep).
-%   2) Substituim legile componentelor R, L, C, Vsrc, Isrc cu subs. 
-%   3) Identificăm necunoscutele algebrice (Z), stările (X), derivările stărilor (Xdot) și intrările (U).
-%   4) Folosim equationsToMatrix peste eqs_subs cu [Z; Xdot; X; U] pentru a extrage coeficienții matricelor:
-%        [ A_Z   A_Xdot   A_X   A_U ] * [Z; Xdot; X; U] = 0. 
-%   5) Din prima coloană (corespunzătoare lui Z) extragem A_Z și restul blocurilor. 
-%      Rezultă A_alg*Z + B_dotX*Xdot + B_X*X + B_U*U = 0.  
-%      Ca atare Z = −A_alg^{-1} * (B_dotX*Xdot + B_X*X + B_U*U).  
-%   6) Substituim această expresie a lui Z înapoi în eqs_subs (folosind subs), rămânând
-%      doar cu ecuaţii diferențiale în X, Xdot și U:  0 =  M_mat*Xdot + N_mat*X + P_mat*U.  
-%   7) Extragem, prin coeffs, M_mat, N_mat, P_mat, apoi calculăm A = −M^{-1}*N și B = −M^{-1}*P.
-%   8) Generăm C,D din output_vars cum am făcut anterior (coeficienţi liniari).
+% Algoritm principal:
+%   1) Convertim ecuațiile KCL/KVL din șiruri în ecuații simbolice, introducând '(t)' 
+%      pentru toate variabilele care nu sunt parametri.
+%   2) Substituim legile componentelor R, C, L, Vsrc, Isrc (ex.: U_R = R I_R, I_C = C dU_C/dt, etc.).
+%   3) Extragem **explicit** necunoscutele algebrice Z:
+%       – Pentru fiecare componentă de tip 'R', necunoscuta este I_<numeR>(t).
+%       – Pentru fiecare element din output_vars, necunoscuta este U_<output>(t).
+%   4) Pentru fiecare ecuație, extragem coeficienții liniari cu `coeffs(expr, var)` pentru:
+%       – fiecare necunoscut algebric Z(k)
+%       – fiecare derivată diff(X(j), t) 
+%       – fiecare stare X(m)
+%       – fiecare intrare U(n)
+%      și construim blocurile A_Z, A_dotX, A_X, A_U.
+%   5) Rezolvăm liniar A_Z * Z + A_dotX * Xdot + A_X * X + A_U * U = 0  ⟹  
+%       Z = – A_Z⁻¹ (A_dotX * Xdot + A_X * X + A_U * U).
+%   6) Substituim expresiile pentru Z înapoi în ecuații → obținem ecuații diferențiale
+%       0 = M_mat * Xdot + N_mat * X + P_mat * U.
+%   7) Extragem M_mat, N_mat, P_mat cu coeffs → A = – M⁻¹ N, B = – M⁻¹ P.
+%   8) Construim C, D folosind tot `coeffs`, din output_vars (ex.: y = U_V1(t) = C*X + D*U).
 %
 % Atenție:
-%  - În comps NU pune elemente de tip „Vout”! Pentru ieșiri folosește doar output_vars.
-%  - state_vars trebuie să conţină EXACT toate U_Cx și I_Lx din circuit.
-%  - input_vars trebuie să conţină EXACT toate sursele (Ve, Ie etc.), fără prefixul 'U_' sau 'I_'.
+%  - În lista `comps`, **nu** pune «Vout» sau «V1». Ieșirea se declară în `output_vars`.
+%  - `state_vars` trebuie să conțină *exact* toate U_Cx și I_Lx din circuit.
+%  - `input_vars` trebuie să conțină *exact* toate sursele (Ve, Ie etc.), fără prefix.
+%  - `output_vars` conține numele nodurilor de ieșire (fără „U_”), ex: {'V1'}, iar în KVL
+%    trebuie să existe o ecuație „U_Cnod - U_V1 = 0” care leagă ieșirea de o stare.
 
-%% 1. Declarații inițiale și simboluri
+%% 1. Declarații inițiale și definirea stărilor/intrărilor
 
 syms t;  % variabila de timp
 
 n_states = numel(state_vars);
 n_inputs = numel(input_vars);
 
-% 1.1. Definim stările X(k) = U_Cx(t) sau I_Lx(t)
+% 1.1. Construim vectorul X al stărilor, ca funcții de timp „*(t)”
 X = sym(zeros(n_states,1));
 for k = 1:n_states
     X(k) = str2sym([ state_vars{k} '(t)' ]);
 end
 
-% 1.2. Definim intrările U(j) = Ve(t) sau Ie(t)
+% 1.2. Construim vectorul U al intrărilor, ca funcții de timp „*(t)”
 U = sym(zeros(n_inputs,1));
 for j = 1:n_inputs
     U(j) = str2sym([ input_vars{j} '(t)' ]);
 end
 
-% 1.3. Definim parametrii ca simbolic real (R1, L2, C3, Ve etc.)
+% 1.3. Definim simbolic parametrii ca fiind reali (Rr, Crr, Lr, Ve etc.)
 param_list = cellfun(@(c) c.param, comps, 'UniformOutput', false);
 for idx = 1:numel(comps)
     sym(param_list{idx}, 'real');
 end
 
-%% 2. Construim ecuațiile Kirchhoff simbolice (KCL + KVL)
+%% 2. Transformăm ecuațiile KCL + KVL în ecuații simbolice
 
 all_eqs_str = [khirchoffs.KCL(:); khirchoffs.KVL(:)];
 N_eq = numel(all_eqs_str);
@@ -74,19 +83,22 @@ eqs_sym = sym(zeros(N_eq,1));
 
 for i = 1:N_eq
     s = all_eqs_str{i};
+    % Găsim toate "cuvintele" (alfanumerice) din șir
     tokens = regexp(s, '([A-Za-z]\w*)', 'tokens');
     unique_vars = unique([tokens{:}]);
     for v = unique_vars
         varname = v{1};
+        % Dacă "varname" nu este un parametru în comps, atunci e o necunoscută și
+        % trebuie să devină o funcție de timp: varname → varname(t)
         if ~any(strcmp(param_list, varname))
-            % Dacă varname nu e parametru, îl transformăm în funcție de timp:
             s = regexprep(s, ['\<', varname, '\>'], [varname '(t)']);
         end
     end
+    % Convertim șirul final în ecuație simbolică
     eqs_sym(i) = str2sym(s);
 end
 
-%% 3. Substituim legile constitutive ale componentelor
+%% 3. Substituim legile constitutive (R, L, C, Vsrc, Isrc)
 
 subs_from = sym.empty;
 subs_to   = sym.empty;
@@ -95,40 +107,40 @@ for idx = 1:numel(comps)
     cmp = comps{idx};
     switch upper(cmp.type)
         case 'R'
-            % U_Rx(t) = R * I_Rx(t)
-            Uc = str2sym(['U_' cmp.name '(t)']);  
-            Ic = str2sym(['I_' cmp.name '(t)']);  
-            R  = sym(cmp.param, 'real');
+            % Rezistor: U_Rx(t) = R * I_Rx(t)
+            Uc = str2sym(['U_' cmp.name '(t)']);   % ex: U_Rr(t)
+            Ic = str2sym(['I_' cmp.name '(t)']);   % ex: I_Rr(t)
+            R  = sym(cmp.param, 'real');           % ex: Rr
             subs_from(end+1) = Uc;
             subs_to  (end+1) = R * Ic;
 
         case 'C'
-            % I_Cx(t) = C * diff(U_Cx(t),t)
+            % Condensator: I_Cx(t) = C * diff(U_Cx(t), t)
             Ic = str2sym(['I_' cmp.name '(t)']);
             Uc = str2sym(['U_' cmp.name '(t)']);
-            Cc = sym(cmp.param, 'real');
+            Cc = sym(cmp.param, 'real');  % ex: Crr
             subs_from(end+1) = Ic;
             subs_to  (end+1) = Cc * diff(Uc, t);
 
         case 'L'
-            % U_Lx(t) = L * diff(I_Lx(t),t)
+            % Bobină: U_Lx(t) = L * diff(I_Lx(t), t)
             Uc = str2sym(['U_' cmp.name '(t)']);
             Ic = str2sym(['I_' cmp.name '(t)']);
-            Ll = sym(cmp.param, 'real');
+            Ll = sym(cmp.param, 'real');  % ex: Lr
             subs_from(end+1) = Uc;
             subs_to  (end+1) = Ll * diff(Ic, t);
 
         case 'VSRC'
-            % U_Vx(t) = Ve(t)
-            Uc = str2sym(['U_' cmp.name '(t)']);
+            % Sursă de tensiune: U_Vx(t) = Ve(t)
+            Uc = str2sym(['U_' cmp.name '(t)']);   % ex: U_Ve(t)
             subs_from(end+1) = Uc;
-            subs_to  (end+1) = str2sym([cmp.param '(t)']);
+            subs_to  (end+1) = str2sym([cmp.param '(t)']);  % ex: Ve(t)
 
         case 'ISRC'
-            % I_Ix(t) = Ie(t)
-            Ic = str2sym(['I_' cmp.name '(t)']);
+            % Sursă de curent: I_Ix(t) = Ie(t)
+            Ic = str2sym(['I_' cmp.name '(t)']);   % ex: I_Ie(t)
             subs_from(end+1) = Ic;
-            subs_to  (end+1) = str2sym([cmp.param '(t)']);
+            subs_to  (end+1) = str2sym([cmp.param '(t)']);  % ex: Ie(t)
 
         otherwise
             error('Tip componentă necunoscut: %s', cmp.type);
@@ -136,156 +148,183 @@ for idx = 1:numel(comps)
 end
 
 eqs_subs = subs(eqs_sym, subs_from, subs_to);
-% Acum eqs_subs conține doar stări (cu var diff(...) pentru C şi L),
-% intrări (Ve(t), Ie(t)) şi necunoscute algebrice (I_Rx(t), U_Vout(t) etc.).
+% --- Acum eqs_subs conține doar:
+%     1) Stările (ca funcții de t, unele cu diff(...) pentru C și L),
+%     2) Intrările (Ve(t), Ie(t)),
+%     3) Necunoscutele algebrice rămase (I_Rx(t) pentru rezistori și U_Vout(t) dacă ieșirea e nod),
+%     4) Parametrii (Rr, Crr, Lr, Ve etc. – dar aceștia vor fi tratați mai jos).
 
-%% 4. Identificăm necunoscutele algebrice (Z), stările (X), derivatele (Xdot) și intrările (U)
+%% 4. Construim lista EXPLICITĂ a necunoscutelor algebrice Z
 
-all_syms = symvar(eqs_subs);  % toți simbolii din ecuații
+% 4.1. Pentru fiecare componentă de tip R, necunoscuta algebrică este I_<name>(t)
+Z_R = sym.empty;
+for idx = 1:numel(comps)
+    cmp = comps{idx};
+    if strcmpi(cmp.type, 'R')
+        Z_R(end+1) = str2sym(['I_' cmp.name '(t)']);
+    end
+end
 
-% 4.1. Stările și derivările lor:
-state_syms = X;                              % [U_C1(t); I_L2(t); …]
-Xdot_syms  = arrayfun(@(x) diff(x,t), X);    % [diff(U_C1(t),t); diff(I_L2(t),t); …]
+% 4.2. Pentru fiecare ieșire (output_vars), necunoscuta algebrică e U_<output>(t)
+Z_out = sym.empty;
+for k = 1:numel(output_vars)
+    outname = output_vars{k};  % ex 'V1'
+    Z_out(end+1) = str2sym(['U_' outname '(t)']);
+end
 
-% 4.2. Intrările simbolice:
-input_syms = U;                              % [Ve(t); Ie(t); …]
+% 4.3. Combinăm lista completă a lui Z:
+Z = [Z_R(:); Z_out(:)]
+n_alg = numel(Z);
 
-% 4.3. Construim lista tuturor „variabilelor cunoscute”:
-known_syms = [ state_syms; Xdot_syms; input_syms ];
-
-% 4.4. Necunoscutele algebrice Z = all_syms \ known_syms
-algebraic_syms = setdiff(all_syms(:), known_syms(:));
-
-% Dacă nu există necunoscute algebrice, Z este vid:
-n_alg = numel(algebraic_syms);
+% 4.4. În mod EXTREM de rar, dacă nu există rezistoare și nici ieșiri, Z poate fi vid:
 if n_alg == 0
+    % Nu avem necunoscute algebrice
     Z = sym.empty;
-else
-    Z = algebraic_syms;  % vector simbolic cu necunoscutele algebrice ex. [I_Rr(t); U_V1(t); …]
 end
 
-%% 5. Rezolvăm liniar pentru Z
+%% 5. Extragem coeficientii folosind jacobian (metoda robusta)
 
-% 5.1. Construim lista completă de necunoscute pentru equationsToMatrix
-%   Ordinea: [ Z; Xdot; X; U ]
-all_vars_for_ETM = [Z; Xdot_syms; X; U];
+% 5.1. Construim lista Xdot
+Xdot_syms = arrayfun(@(x) diff(x, t), X);  % de ex: x1, x2
 
-% 5.2. Extragem cu equationsToMatrix matricea A_full și b_full, 
-%      unde:  A_full * [Z; Xdot; X; U] + b_full = 0.
-[A_full, b_full] = equationsToMatrix(eqs_subs, all_vars_for_ETM);
+% 5.2. Asiguram ca ecuatiile sunt de forma 'expr = 0'
+eqs_expr = lhs(eqs_subs) - rhs(eqs_subs);
 
-% 5.3. Împărțim A_full în blocuri:
-%      A_full = [ A_Z      A_Xdot      A_X      A_U ] 
-%   Unde A_Z este coloanele corespunzătoare lui Z, 
-%         A_Xdot coloanele pentru derivările stărilor, 
-%         A_X coloanele pentru stări, 
-%         A_U coloanele pentru intrări.
-n_dotx = numel(Xdot_syms);
-n_x    = n_states;
-n_u    = n_inputs;
-
-% Indici:
-idx_Z    = 1:n_alg;
-idx_dotX = n_alg + (1:n_dotx);
-idx_X    = n_alg + n_dotx + (1:n_x);
-idx_U    = n_alg + n_dotx + n_x   + (1:n_u);
-
-A_Z    = A_full(:, idx_Z);
-A_dotX = A_full(:, idx_dotX);
-A_X    = A_full(:, idx_X);
-A_U    = A_full(:, idx_U);
-
-% 5.4. Rezolvăm A_Z * Z + A_dotX * Xdot + A_X * X + A_U * U = 0  
-%      ⇒ Z = - A_Z^{-1} * (A_dotX*Xdot + A_X*X + A_U*U)
+% 5.3. Extragem matricele de coeficienti direct cu jacobian
+% Daca sistemul e liniar, jacobianul expresiilor fata de variabile
+% este chiar matricea coeficientilor.
 if n_alg > 0
+    A_Z = jacobian(eqs_expr, Z)
+else
+    A_Z = sym([]); % Matrice goala daca nu avem var. algebrice
+end
+
+A_dotX = jacobian(eqs_expr, Xdot_syms);
+A_X    = jacobian(eqs_expr, X);
+A_U    = jacobian(eqs_expr, U);
+
+% 5.4. Rezolvam liniar pentru Z
+% disp('Matricea A_Z calculata cu jacobian:');
+% disp(A_Z);
+% disp('Necunoscutele algebrice Z:');
+% disp(Z);
+
+if n_alg > 0
+    % Verificam daca A_Z este patratica si inversibila.
+    % Numarul de ecuatii trebuie sa fie cel putin egal cu numarul de necunoscute.
     if rank(A_Z) < n_alg
-        error('A_Z nu este inversibilă (%d × %d), nu pot elimina simbolic necunoscutele algebrice.', n_alg, n_alg);
+        error('Blocul A_Z (dim %d x %d) nu este inversibil. Verificati KCL/KVL.', size(A_Z,1), size(A_Z,2));
     end
-    % Calculăm în mod simbolic Z în funcție de (Xdot, X, U):
-    Z_expr = simplify(- inv(A_Z) * (A_dotX*Xdot_syms + A_X*X + A_U*U));
-    %  Z_expr este un vector cu n_alg rânduri. 
-    %  Z(i) = Z_expr(i), pentru fiecare necunoscut algebric.
-else
-    Z_expr = sym.empty; 
+    % LINIA CORECTATĂ (folosind operatorul backslash)
+% BLOCUL NOU - Selectează un sub-sistem pătratic și consistent
+RHS = - (A_dotX*Xdot_syms + A_X*X + A_U*U);
+
+
+% 1. Apelam rref cu un singur argument de iesire
+R = rref(A_Z');
+
+% 2. Gasim manual coloanele pivot din matricea R
+pivot_rows_idx = [];
+[num_rows, ~] = size(R);
+for i = 1:num_rows
+    % Gasim prima pozitie nenula pe fiecare rand
+    pivot_col = find(R(i, :), 1, 'first');
+    if ~isempty(pivot_col)
+        % Adaugam indexul coloanei la lista noastra de pivoti
+        pivot_rows_idx(end+1) = pivot_col;
+    end
+end
+% Sortam pentru a mentine o ordine consistenta, desi nu e strict necesar
+pivot_rows_idx = sort(pivot_rows_idx);
+fprintf('--------------------------------------------------\n');
+disp('Indicii ecuațiilor folosite pentru a găsi curenții Z:');
+disp(pivot_rows_idx');
+fprintf('--------------------------------------------------\n');
+
+if length(pivot_rows_idx) < n_alg
+    error('Sistemul algebric este dependent. Nu se pot determina toate necunoscutele Z.');
 end
 
-%% 6. Substituim expresiile lui Z înapoi în ecuațiile inițiale
+% Selectăm doar rândurile independente pentru a forma un sistem pătratic
+A_Z_sq = A_Z(pivot_rows_idx, :);
+RHS_sq = RHS(pivot_rows_idx, :);
 
+fprintf('S-a selectat un sub-sistem %d x %d pentru a rezolva Z.\n', size(A_Z_sq,1), size(A_Z_sq,2));
+
+% Rezolvăm sistemul PĂTRATIC, care acum are o soluție unică și finită
+Z_expr = simplify(A_Z_sq \ RHS_sq);
+else
+    Z_expr = sym.empty;
+end
+%% 6. Substituim expresiile pentru Z în ecuații, obţinem doar ecuații diferențiale
+
+all_eq_indices = 1:N_eq;
+% Găsim indicii ecuațiilor care NU au fost folosite pentru Z (algebrice).
+% Acestea sunt ecuațiile noastre pur dinamice.
+dyn_eq_indices = setdiff(all_eq_indices, pivot_rows_idx);
+
+% Selectăm DOAR aceste ecuații dinamice
+eqs_diff = eqs_subs(dyn_eq_indices);
+
+% Și substituim Z doar în acest sub-set, dacă e cazul
 if n_alg > 0
-    subs_from2 = Z;
-    subs_to2   = Z_expr;
-    eqs_diff   = subs(eqs_subs, subs_from2, subs_to2);
-else
-    eqs_diff = eqs_subs;
+    eqs_diff = subs(eqs_diff, Z, Z_expr);
 end
-% Acum eqs_diff conține numai stări, derivări de stări și intrări:  
-%     0 = f( Xdot, X, U ).
+% ⇒ Acum eqs_diff conține doar termeni în Xdot, X și U:
+%    0 = f_i(Xdot, X, U)
 
-%% 7. Extragem M_mat, N_mat, P_mat din eqs_diff
+%% 7. Extragem M_mat, N_mat si P_mat folosind jacobian
 
-% 7.1. Inițializăm matricile cu size = (#ecuații) × (#stări / #intrări)
-M_mat = sym(zeros(N_eq, n_states));  % coef. în faţa diff(X,t)
-N_mat = sym(zeros(N_eq, n_states));  % coef. în faţa X
-P_mat = sym(zeros(N_eq, n_inputs));  % coef. în faţa U
+% Asiguram ca ecuatiile diferentiale sunt de forma 'expr = 0'
+eqs_diff_expr = lhs(eqs_diff) - rhs(eqs_diff);
 
-for i = 1:N_eq
-    expr = eqs_diff(i);  % ecuația i, de forma M_i*Xdot + N_i*X + P_i*U = 0
+% Extragem matricele M, N, P
+M_mat = jacobian(eqs_diff_expr, Xdot_syms);
+N_mat = jacobian(eqs_diff_expr, X);
+P_mat = jacobian(eqs_diff_expr, U);
 
-    % 7.a. Coef. pentru diff(X(k),t)
-    for k = 1:n_states
-        dvar = Xdot_syms(k);
-        [Cterms, Tterms] = coeffs(expr, dvar);
-        idx_match = find(Tterms == dvar, 1);
-        if isempty(idx_match)
-            M_mat(i,k) = 0;
-        else
-            M_mat(i,k) = Cterms(idx_match);
-        end
-    end
+%% 8. Selectam randurile independente si construim A si B
 
-    % 7.b. Coef. pentru X(k)
-    for k = 1:n_states
-        var = X(k);
-        [Cterms, Tterms] = coeffs(expr, var);
-        idx_match = find(Tterms == var, 1);
-        if isempty(idx_match)
-            N_mat(i,k) = 0;
-        else
-            N_mat(i,k) = Cterms(idx_match);
-        end
-    end
+% Combinam matricile pentru a gasi randurile independente ale intregului sistem dinamic
+Full_dyn_mat = [M_mat, N_mat, P_mat];
 
-    % 7.c. Coef. pentru U(j)
-    for j = 1:n_inputs
-        varu = U(j);
-        [Cterms, Tterms] = coeffs(expr, varu);
-        idx_match = find(Tterms == varu, 1);
-        if isempty(idx_match)
-            P_mat(i,j) = 0;
-        else
-            P_mat(i,j) = Cterms(idx_match);
-        end
+% Folosim metoda compatibila cu rref pentru a gasi randurile pivot
+R_dyn = rref(Full_dyn_mat');
+pivot_rows_dyn_idx = [];
+[num_rows_dyn, ~] = size(R_dyn);
+for i = 1:num_rows_dyn
+    pivot_col_dyn = find(R_dyn(i, :), 1, 'first');
+    if ~isempty(pivot_col_dyn)
+        pivot_rows_dyn_idx(end+1) = pivot_col_dyn;
     end
 end
+pivot_rows_dyn_idx = sort(pivot_rows_dyn_idx);
 
-%% 8. Construim A și B
-
-if rank(M_mat) < n_states
-    error(['Matricea M_mat nu este inversibilă (rang < %d). Verifică:\n' ...
-           '  - ai scris suficient de multe ecuații KCL/KVL?\n' ...
-           '  - ai inclus toate stările (U_Cx, I_Lx) în state_vars?'], n_states);
+% Verificam daca am gasit suficiente ecuatii de stare
+if length(pivot_rows_dyn_idx) < n_states
+     error('Nu s-au putut gasi suficiente ecuatii dinamice independente (%d gasite, %d necesare). Verifica KCL/KVL sau matricea reprezentativa. ', ...
+        length(pivot_rows_dyn_idx), n_states);
 end
 
-A = simplify(- inv(M_mat) * N_mat);
-B = simplify(- inv(M_mat) * P_mat);
+% Selectam doar randurile independente pentru a forma matrici patratice/corecte
+M_sq = M_mat(pivot_rows_dyn_idx, :)           %% problema posibila aici
+N_sq = N_mat(pivot_rows_dyn_idx, :);
+P_sq = P_mat(pivot_rows_dyn_idx, :);
 
-%% 9. Construim C și D din output_vars
+% Acum M_sq este patratica si inversibila. Calculam A si B.
+if rank(M_sq) < n_states
+    % Aceasta eroare nu ar trebui sa apara daca logica e corecta,
+    % dar o pastram ca masura de siguranta.
+    error('Matricea M_mat selectata nu este inversibilă (rang < %d). Verifică state_vars. (cel mai probabil ai 2 bobine in serie sau 2 condensatoare in paralel => x1 derivat depinde de x2 derivat si vice versa ', n_states);
+end
+
+  A = simplify(-inv(M_sq) * N_sq);
+     B = simplify(-inv(M_sq) * P_sq);
+%% 9. Construim C și D din output_vars folosind jacobian
 
 if isempty(output_vars)
-    C = sym.empty;
-    D = sym.empty;
-    state_syms = X;
-    input_syms = U;
+    C = sym.empty; D = sym.empty;
+    state_syms = X; input_syms = U;
     return;
 end
 
@@ -293,55 +332,49 @@ n_outputs = numel(output_vars);
 C = sym(zeros(n_outputs, n_states));
 D = sym(zeros(n_outputs, n_inputs));
 
+% Construim un vector simbolic al iesirilor, Y
+Y_sym = sym(zeros(n_outputs, 1));
 for k = 1:n_outputs
-    yk = output_vars{k};
-
-    % 9.a. Dacă yk e un singur nume (fără + - * /), interpretăm că este „nodul” 
-    %      de tensiune la iesire → yk_sym = 'U_<yk>(t)'.
-    if isempty(regexp(yk, '[\+\-\*/]', 'once'))
-        yk_sym = str2sym(['U_' yk '(t)']);
+    yk_str = output_vars{k};
+    % Aici trebuie sa definim iesirile ca expresii ale starilor, intrarilor, etc.
+    % Presupunem ca iesirea este o tensiune de nod, ex: 'V1' -> U_V1(t)
+    if isempty(regexp(yk_str, '[\+\-\*/]', 'once'))
+        yk_sym = str2sym(['U_' yk_str '(t)']);
     else
-        % Dacă e o combinație liniară, adăugăm '(t)' lângă fiecare stare/intrare
-        expr = yk;
-        tokens = regexp(expr, '([A-Za-z]\w*)', 'tokens');
-        unique_vars = unique([tokens{:}]);
-        for v = unique_vars
-            varname = v{1};
-            if any(strcmp(state_vars, varname))
-                expr = regexprep(expr, ['\<', varname, '\>'], [varname '(t)']);
-            elseif any(strcmp(input_vars, varname))
-                expr = regexprep(expr, ['\<', varname, '\>'], [varname '(t)']);
-            end
-        end
-        yk_sym = str2sym(expr);
+        % Daca e o expresie mai complexa, ar trebui tratata similar cu pasul 2
+        % (momentan nu este implementat in detaliu aici)
+        yk_sym = str2sym(yk_str); % Simplificare
     end
-
-    % 9.b. Extragem coeficienții liniari din yk_sym = C_row * X + D_row * U
-    for i = 1:n_states
-        var = X(i);
-        [Cterms, Tterms] = coeffs(yk_sym, var);
-        idx_match = find(Tterms == var, 1);
-        if isempty(idx_match)
-            C(k, i) = 0;
-        else
-            C(k, i) = Cterms(idx_match);
-        end
-    end
-    for j = 1:n_inputs
-        varu = U(j);
-        [Cterms, Tterms] = coeffs(yk_sym, varu);
-        idx_match = find(Tterms == varu, 1);
-        if isempty(idx_match)
-            D(k, j) = 0;
-        else
-            D(k, j) = Cterms(idx_match);
-        end
+    
+    % Substituim necunoscutele algebrice (inclusiv iesirea U_V1(t))
+    % cu expresiile lor in functie de X si U
+    if n_alg > 0
+        Y_sym(k) = subs(yk_sym, Z, Z_expr);
+    else
+        Y_sym(k) = yk_sym;
     end
 end
 
-C = simplify(C);
-D = simplify(D);
+C_initial = simplify(jacobian(Y_sym, X));
+D_initial = simplify(jacobian(Y_sym, U));
+E = simplify(jacobian(Y_sym, Xdot_syms)); % NOU: Matricea de dependență de ẋ
+
+% Pas 2: Verifică dacă există dependență de ẋ. Dacă da, aplică corecția.
+if any(E(:) ~= 0)
+    fprintf('Dependență de derivata stării detectată. Se aplică corecția C=C+E*A, D=D+E*B.\n');
+    % Calculează matricile finale folosind formula
+    C_final = C_initial + E * A;
+    D_final = D_initial + E * B;
+    
+    C = simplify(C_final);
+    D = simplify(D_final);
+else
+    % Dacă nu există dependență, C și D rămân cele inițiale
+    C = C_initial;
+    D = D_initial;
+end
 
 state_syms = X;
 input_syms = U;
+
 end
